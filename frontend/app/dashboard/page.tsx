@@ -229,7 +229,7 @@ export default function DashboardPage() {
           </div>
           <button
             onClick={handleSignOut}
-            className="px-4 py-2 text-sm rounded"
+            className="px-4 py-2 text-sm rounded cursor-pointer"
             style={{ border: '1px solid var(--border)' }}
           >
             Sign Out

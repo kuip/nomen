@@ -1,7 +1,7 @@
 import { supabase } from '@/lib/supabase'
 
 interface OAuthButtonProps {
-  provider: 'google' | 'github' | 'facebook' | 'twitter' | 'discord' | 'linkedin_oidc'
+  provider: 'google' | 'github' | 'facebook' | 'twitter' | 'discord' | 'linkedin_oidc' | 'tiktok'
   icon: React.ReactNode
   label: string
 }
