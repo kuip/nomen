@@ -318,19 +318,42 @@ export default function DashboardPage() {
                         className="flex items-center justify-between gap-4 p-3 rounded"
                         style={{ border: option.is_preferred ? '1px solid var(--accent)' : '1px solid var(--border)' }}
                       >
-                        <div>
-                          <div className="text-sm">{option.attribute_value}</div>
-                          <div className="text-xs opacity-60">
-                            Source: {option.source_provider || 'unknown'}
-                            {option.identity_id && (
-                              <span className="ml-1 opacity-50">({option.identity_id.substring(0, 8)}...)</span>
-                            )}
+                        <div className="flex items-center gap-3">
+                          {key === 'avatar_url' && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={option.attribute_value}
+                              alt="avatar"
+                              className="w-10 h-10 rounded-full object-cover"
+                            />
+                          )}
+                          <div>
+                            <div className="text-sm">
+                              {key === 'avatar_url' ? (
+                                <a
+                                  href={option.attribute_value}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="hover:underline cursor-pointer"
+                                >
+                                  {option.attribute_value}
+                                </a>
+                              ) : (
+                                option.attribute_value
+                              )}
+                            </div>
+                            <div className="text-xs opacity-60">
+                              Source: {option.source_provider || 'unknown'}
+                              {option.identity_id && (
+                                <span className="ml-1 opacity-50">({option.identity_id.substring(0, 8)}...)</span>
+                              )}
+                            </div>
                           </div>
                         </div>
                         {!option.is_preferred && (
                           <button
                             onClick={() => handleSetPreferred(option.id)}
-                            className="text-sm px-3 py-1 rounded"
+                            className="text-sm px-3 py-1 rounded cursor-pointer"
                             style={{ border: '1px solid var(--border)' }}
                           >
                             Use this
