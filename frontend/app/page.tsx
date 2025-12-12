@@ -1,7 +1,25 @@
+'use client'
+
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import Image from 'next/image'
+import { supabase } from '@/lib/supabase'
 
 export default function Home() {
+  const router = useRouter()
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session) {
+        router.push('/dashboard')
+      }
+    }
+
+    checkAuth()
+  }, [router])
+
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="max-w-lg text-center space-y-6">

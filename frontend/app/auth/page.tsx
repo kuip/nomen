@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 import OAuthButton from '@/components/OAuthButton'
@@ -11,6 +11,17 @@ export default function AuthPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const router = useRouter()
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session) {
+        router.push('/dashboard')
+      }
+    }
+
+    checkAuth()
+  }, [router])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
