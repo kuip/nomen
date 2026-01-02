@@ -1,7 +1,7 @@
 'use client'
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import type { Session } from '@supabase/supabase-js'
 
@@ -30,13 +30,6 @@ interface ProfileAttribute {
   updated_at: string
 }
 
-interface MergeCandidate {
-  other_user_id: string
-  other_profile_id: string | null
-  other_display_name: string | null
-  other_email: string | null
-}
-
 type ProviderId = 'google' | 'github' | 'linkedin_oidc' | 'facebook' | 'discord' | 'twitter'
 
 const providerOptions: Array<{ id: ProviderId; label: string }> = [
@@ -55,19 +48,62 @@ function DashboardContent() {
   const [attributes, setAttributes] = useState<ProfileAttribute[]>([])
   const [loading, setLoading] = useState(true)
   const [linkCounts, setLinkCounts] = useState<Record<string, number>>({})
-  const [mergeCandidate, setMergeCandidate] = useState<MergeCandidate | null>(null)
   const [mergeLoading, setMergeLoading] = useState(false)
   const [mergeError, setMergeError] = useState<string | null>(null)
+  const [showMergeProviders, setShowMergeProviders] = useState(false)
+  const [pendingMergeToken, setPendingMergeToken] = useState<string | null>(null)
+  const [mergeRequesterInfo, setMergeRequesterInfo] = useState<{ display_name: string | null; email: string | null } | null>(null)
   const router = useRouter()
-  const searchParams = useSearchParams()
 
   useEffect(() => {
     const initAuth = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session }, error } = await supabase.auth.getSession()
+
+      // Handle invalid/expired refresh token
+      if (error) {
+        console.error('Session error:', error)
+        await supabase.auth.signOut()
+        router.push('/auth')
+        return
+      }
 
       if (!session) {
         router.push('/auth')
         return
+      }
+
+      // Check if we're returning from a merge OAuth flow
+      const mergeToken = sessionStorage.getItem('merge_token')
+
+      if (mergeToken) {
+        // Don't clear token yet - we need it for confirmation
+        // Look up who initiated this merge request
+        try {
+          const { data, error } = await supabase.rpc('get_merge_requester_info', {
+            p_token: mergeToken,
+          })
+
+          if (error || !data?.success) {
+            // Invalid or expired token
+            sessionStorage.removeItem('merge_token')
+            if (data?.error === 'same_user') {
+              setMergeError('This provider is already linked to your account.')
+            } else {
+              setMergeError(data?.error || 'Invalid or expired merge request.')
+            }
+          } else {
+            // Show confirmation dialog with requester info
+            setPendingMergeToken(mergeToken)
+            setMergeRequesterInfo({
+              display_name: data.requester_display_name,
+              email: data.requester_email,
+            })
+          }
+        } catch (err) {
+          console.error('Error checking merge request:', err)
+          sessionStorage.removeItem('merge_token')
+          setMergeError('Failed to verify merge request')
+        }
       }
 
       setSession(session)
@@ -85,56 +121,6 @@ function DashboardContent() {
 
     return () => subscription.unsubscribe()
   }, [router])
-
-  // Check for merge-related URL parameters
-  useEffect(() => {
-    const mergeUserId = searchParams.get('merge_user')
-    const errorParam = searchParams.get('error')
-    const errorDesc = searchParams.get('error_description')
-
-    // Handle OAuth errors that might indicate identity conflict
-    if (errorParam || errorDesc) {
-      const errorMessage = errorDesc || errorParam || 'Authentication error'
-      if (errorMessage.toLowerCase().includes('identity') ||
-          errorMessage.toLowerCase().includes('already') ||
-          errorMessage.toLowerCase().includes('exists')) {
-        setMergeError('This provider is already linked to another account. Use the merge feature below to combine accounts.')
-      } else {
-        setMergeError(errorMessage)
-      }
-      // Clean URL
-      router.replace('/dashboard')
-    }
-
-    // Handle direct merge request via URL
-    if (mergeUserId && session) {
-      handleMergeFromUrl(mergeUserId)
-      router.replace('/dashboard')
-    }
-  }, [searchParams, session, router])
-
-  async function handleMergeFromUrl(sourceUserId: string) {
-    // Look up the source user's profile info
-    const { data, error } = await supabase
-      .from('users')
-      .select('profile_id, profiles(display_name, primary_email)')
-      .eq('id', sourceUserId)
-      .single()
-
-    if (error || !data) {
-      setMergeError('Could not find the account to merge')
-      return
-    }
-
-    const profile = data.profiles as { display_name: string | null; primary_email: string | null } | null
-
-    setMergeCandidate({
-      other_user_id: sourceUserId,
-      other_profile_id: data.profile_id,
-      other_display_name: profile?.display_name || null,
-      other_email: profile?.primary_email || null,
-    })
-  }
 
   async function loadUserData(userId: string) {
     try {
@@ -233,13 +219,10 @@ function DashboardContent() {
       if (error) {
         console.error('Failed to link identity:', error)
         // Check if this is an "identity already exists" error
-        // Supabase returns this when the identity is linked to another user
         if (error.message?.toLowerCase().includes('identity') ||
             error.code === 'identity_already_exists' ||
             error.message?.toLowerCase().includes('already')) {
-          // The OAuth flow was likely interrupted, user needs to try again
-          // and we'll catch the conflict in the callback
-          setMergeError('This provider may be linked to another account. Please try again.')
+          setMergeError('This provider is linked to another account. Use "Merge Another Account" to combine accounts.')
         }
       }
     } catch (err) {
@@ -247,74 +230,104 @@ function DashboardContent() {
     }
   }
 
-  async function checkForMergeCandidate(provider: string, providerId: string) {
-    try {
-      const { data, error } = await supabase.rpc('check_merge_candidate', {
-        p_provider: provider,
-        p_provider_id: providerId,
-      })
-
-      if (error) {
-        console.error('Failed to check merge candidate:', error)
-        return null
-      }
-
-      if (data?.success && data?.can_merge) {
-        return {
-          other_user_id: data.other_user_id,
-          other_profile_id: data.other_profile_id,
-          other_display_name: data.other_display_name,
-          other_email: data.other_email,
-        } as MergeCandidate
-      }
-
-      return null
-    } catch (err) {
-      console.error('Failed to check merge candidate:', err)
-      return null
-    }
-  }
-
-  async function handleMergeAccounts() {
-    if (!mergeCandidate || !session?.user?.id) return
+  // Confirm and execute the merge
+  async function confirmMerge() {
+    if (!pendingMergeToken) return
 
     setMergeLoading(true)
     setMergeError(null)
 
     try {
-      // Call the SQL function directly via RPC
-      const { data, error } = await supabase.rpc('merge_profiles', {
-        p_target_user_id: session.user.id,
-        p_source_user_id: mergeCandidate.other_user_id,
+      const { data, error } = await supabase.rpc('execute_merge_with_token', {
+        p_token: pendingMergeToken,
       })
+
+      // Clear token from storage regardless of outcome
+      sessionStorage.removeItem('merge_token')
+      setPendingMergeToken(null)
+      setMergeRequesterInfo(null)
 
       if (error) {
         console.error('Merge error:', error)
         setMergeError(error.message || 'Failed to merge accounts')
+      } else if (data && !data.success) {
+        setMergeError(data.error || 'Failed to merge accounts')
+      } else if (data?.success) {
+        // Merge successful! Current user was merged into the original requester.
+        // Current session is now invalid, need to sign out and sign back in.
+        alert('Accounts merged successfully! Please sign in again with any of your linked providers.')
+        await supabase.auth.signOut()
+        router.push('/auth')
         return
       }
-
-      const result = data as { success: boolean; error?: string }
-
-      if (!result.success) {
-        setMergeError(result.error || 'Failed to merge accounts')
-        return
-      }
-
-      // Success! Reload user data to reflect the merge
-      setMergeCandidate(null)
-      await loadUserData(session.user.id)
     } catch (err) {
-      console.error('Failed to merge accounts:', err)
-      setMergeError('An unexpected error occurred')
+      console.error('Merge error:', err)
+      setMergeError('An unexpected error occurred during merge')
     } finally {
       setMergeLoading(false)
     }
   }
 
-  function closeMergeDialog() {
-    setMergeCandidate(null)
-    setMergeError(null)
+  // Reject the merge request
+  async function rejectMerge() {
+    if (!pendingMergeToken) return
+
+    setMergeLoading(true)
+
+    try {
+      // Delete the pending merge from database
+      await supabase.rpc('cancel_merge_request', {
+        p_token: pendingMergeToken,
+      })
+    } catch (err) {
+      console.error('Error cancelling merge:', err)
+    } finally {
+      // Clear token from storage
+      sessionStorage.removeItem('merge_token')
+      setPendingMergeToken(null)
+      setMergeRequesterInfo(null)
+      setMergeLoading(false)
+    }
+  }
+
+  // Start the secure merge flow
+  async function startMergeFlow(provider: ProviderId) {
+    try {
+      setMergeLoading(true)
+      setMergeError(null)
+
+      // 1. Create a merge request in the database (returns secure token)
+      const { data, error } = await supabase.rpc('create_merge_request')
+
+      if (error || !data?.success) {
+        setMergeError(error?.message || data?.error || 'Failed to create merge request')
+        return
+      }
+
+      const token = data.token
+
+      // 2. Store only the token in sessionStorage (NOT the user ID)
+      sessionStorage.setItem('merge_token', token)
+
+      // 3. Sign in with OAuth (this will change the session if identity belongs to another user)
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: provider as any,
+        options: {
+          redirectTo: `${window.location.origin}/dashboard`,
+        }
+      })
+
+      if (oauthError) {
+        sessionStorage.removeItem('merge_token')
+        setMergeError(oauthError.message || 'Failed to start OAuth')
+      }
+    } catch (err) {
+      console.error('Failed to start merge flow:', err)
+      sessionStorage.removeItem('merge_token')
+      setMergeError('An unexpected error occurred')
+    } finally {
+      setMergeLoading(false)
+    }
   }
 
   const groupedAttributes = useMemo(() => {
@@ -432,6 +445,44 @@ function DashboardContent() {
           ) : null}
         </div>
 
+        {/* Merge Another Account Section */}
+        {user?.profile_id && (
+          <div className="mb-6">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-medium">Merge Another Account</h2>
+              <button
+                onClick={() => setShowMergeProviders(!showMergeProviders)}
+                className="text-sm px-3 py-1 rounded cursor-pointer"
+                style={{ border: '1px solid var(--border)' }}
+              >
+                {showMergeProviders ? 'Cancel' : 'Merge'}
+              </button>
+            </div>
+
+            {showMergeProviders && (
+              <div className="p-4 rounded" style={{ border: '1px solid var(--border)' }}>
+                <p className="text-sm opacity-70 mb-4">
+                  Select a provider to sign in with your other account. After authentication,
+                  that account will be merged into this one.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {providerOptions.map(({ id, label }) => (
+                    <button
+                      key={id}
+                      onClick={() => startMergeFlow(id)}
+                      disabled={mergeLoading}
+                      className="px-4 py-2 rounded cursor-pointer hover:opacity-80 disabled:opacity-50"
+                      style={{ border: '1px solid var(--border)' }}
+                    >
+                      {mergeLoading ? 'Please wait...' : `Sign in with ${label}`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="mb-6">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-medium">Attributes</h2>
@@ -537,7 +588,7 @@ function DashboardContent() {
         )}
 
         {/* Error message display */}
-        {mergeError && !mergeCandidate && (
+        {mergeError && (
           <div className="mt-4 p-4 rounded bg-red-50 dark:bg-red-900/20" style={{ border: '1px solid #ef4444' }}>
             <p className="text-red-600 dark:text-red-400">{mergeError}</p>
             <button
@@ -551,50 +602,47 @@ function DashboardContent() {
       </div>
 
       {/* Merge Confirmation Dialog */}
-      {mergeCandidate && (
+      {pendingMergeToken && mergeRequesterInfo && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-900 rounded-lg max-w-md w-full p-6" style={{ border: '1px solid var(--border)' }}>
-            <h2 className="text-xl font-semibold mb-4">Merge Accounts?</h2>
+            <h2 className="text-xl font-semibold mb-4">Merge Account Request</h2>
 
             <p className="mb-4 opacity-80">
-              The provider you selected is linked to another account. Would you like to merge that account into your current account?
+              Another account has requested to merge your account into theirs.
+              If you accept, your account will be absorbed and you will need to sign in again.
             </p>
 
             <div className="p-4 rounded mb-4" style={{ border: '1px solid var(--border)', backgroundColor: 'var(--background)' }}>
+              <div className="text-sm opacity-60 mb-1">Requesting account:</div>
               <div className="font-medium">
-                {mergeCandidate.other_display_name || 'Unknown User'}
+                {mergeRequesterInfo.display_name || 'Unknown User'}
               </div>
               <div className="text-sm opacity-70">
-                {mergeCandidate.other_email || 'No email'}
+                {mergeRequesterInfo.email || 'No email'}
               </div>
             </div>
 
             <p className="text-sm opacity-60 mb-4">
-              After merging, all linked providers and profile data from the other account will be added to your current account. The other account will continue to work but will share this profile.
+              After merging, all your linked providers and profile data will be moved to the requesting account.
+              Your current account will be deleted.
             </p>
-
-            {mergeError && (
-              <div className="p-3 rounded mb-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-sm">
-                {mergeError}
-              </div>
-            )}
 
             <div className="flex gap-3 justify-end">
               <button
-                onClick={closeMergeDialog}
+                onClick={rejectMerge}
                 disabled={mergeLoading}
                 className="px-4 py-2 text-sm rounded cursor-pointer"
                 style={{ border: '1px solid var(--border)' }}
               >
-                Cancel
+                {mergeLoading ? 'Please wait...' : 'Reject'}
               </button>
               <button
-                onClick={handleMergeAccounts}
+                onClick={confirmMerge}
                 disabled={mergeLoading}
                 className="px-4 py-2 text-sm rounded cursor-pointer text-white"
                 style={{ backgroundColor: 'var(--accent)' }}
               >
-                {mergeLoading ? 'Merging...' : 'Yes, Merge Accounts'}
+                {mergeLoading ? 'Merging...' : 'Accept & Merge'}
               </button>
             </div>
           </div>
